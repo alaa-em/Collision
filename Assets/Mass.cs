@@ -1,18 +1,25 @@
-﻿using System.Collections;
-using System.Collections.Generic;
+﻿// Mass.cs
 using UnityEngine;
 
-public class Mass : MonoBehaviour
+public class Mass
 {
-    // Start is called before the first frame update
-    void Start()
+    public Vector3 position;
+    public Vector3 velocity;
+    public Vector3 force;
+    public float mass;
+    public float damping; // Air resistance coefficient
+
+    public Mass(Vector3 pos, float m = 0.5f, float damp = 1.5f)
     {
-        
+        position = pos;
+        velocity = Vector3.zero;
+        force = Vector3.zero;
+        mass = m;
+        damping = damp;
     }
 
-    // Update is called once per frame
-    void Update()
+    public void ApplyForce(Vector3 f)
     {
-        
+        force += f;
     }
 }

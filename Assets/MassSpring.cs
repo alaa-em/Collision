@@ -1,108 +1,242 @@
-﻿using System.Collections.Generic;
+﻿// MassSpring.cs
+using System.Collections.Generic;
 using UnityEngine;
 
-[ExecuteAlways]
+
+[ExecuteInEditMode]
 [RequireComponent(typeof(Voxelization))]
 public class MassSpring : MonoBehaviour
 {
-    [Header("References")]
-    public Voxelization voxelization;
+    // Physics parameters
+    public Vector3 gravity = new Vector3(0, -1.81f, 0);
+    public float timeStep = 0.005f;
+    public int solverIterations = 10;
 
-    [Header("Spring Material")]
-    public SpringMaterial springMaterial;
+    // Mass parameters
+    public float massValue = 0.5f;
+    public float massDamping = 1.5f;
 
-    [System.Serializable]
-    public enum MaterialType { Steel, Rubber, Wood, Jelly, Cloth }
+    // Spring parameters
+    public float springStiffness = 5000f;
+    public float springDamping = 50f;
+    public float connectionThreshold = 1.1f;
 
-    [System.Serializable]
-    public struct SpringMaterial
+    // Collision
+    public bool enableGroundCollision = true;
+    public float groundHeight = 0f;
+    public float collisionRestitution = 0.7f;
+
+    private List<Mass> masses = new List<Mass>();
+    private List<Spring> springs = new List<Spring>();
+    private Voxelization voxelizer;
+    private float accumulatedTime = 0f;
+
+    void Start()
     {
-        public MaterialType type;
-        public float stiffness;
-        public float damping;
+        voxelizer = GetComponent<Voxelization>();
+        BuildSystem();
+    }
 
-        public static SpringMaterial GetPreset(MaterialType mat)
+    [ContextMenu("Rebuild System")]
+    public void BuildSystem()
+    {
+        BuildMasses();
+        BuildSprings();
+    }
+
+    void BuildMasses()
+    {
+        masses.Clear();
+        if (voxelizer.InsideVoxels1 == null) return;
+
+        foreach (var voxel in voxelizer.InsideVoxels1)
         {
-            switch (mat)
+            if (voxel == null) continue;
+            Vector3 localPos = transform.InverseTransformPoint(voxel.WorldPosition);
+            masses.Add(new Mass(localPos, massValue, massDamping));
+        }
+    }
+
+    private void BuildSprings()
+    {
+        if (masses.Count == 0) return;
+
+        float voxelSize = voxelizer.voxelSize;
+        float threshold = voxelSize * connectionThreshold;
+        float sqrThreshold = threshold * threshold;
+
+        Dictionary<Vector3Int, List<int>> grid = new Dictionary<Vector3Int, List<int>>();
+        float gridSize = threshold;
+
+        for (int i = 0; i < masses.Count; i++)
+        {
+            Vector3Int cell = new Vector3Int(
+                Mathf.FloorToInt(masses[i].position.x / gridSize),
+                Mathf.FloorToInt(masses[i].position.y / gridSize),
+                Mathf.FloorToInt(masses[i].position.z / gridSize)
+            );
+
+            if (!grid.ContainsKey(cell)) grid[cell] = new List<int>();
+            grid[cell].Add(i);
+        }
+
+        for (int i = 0; i < masses.Count; i++)
+        {
+            Vector3Int cell = new Vector3Int(
+                Mathf.FloorToInt(masses[i].position.x / gridSize),
+                Mathf.FloorToInt(masses[i].position.y / gridSize),
+                Mathf.FloorToInt(masses[i].position.z / gridSize)
+            );
+
+            for (int x = -1; x <= 1; x++)
+                for (int y = -1; y <= 1; y++)
+                    for (int z = -1; z <= 1; z++)
+                    {
+                        Vector3Int neighborCell = cell + new Vector3Int(x, y, z);
+                        if (!grid.ContainsKey(neighborCell)) continue;
+
+                        foreach (int j in grid[neighborCell])
+                        {
+                            if (j <= i) continue;
+
+                            float sqrDist = Vector3.SqrMagnitude(
+                                masses[i].position - masses[j].position);
+
+                            if (sqrDist <= sqrThreshold)
+                            {
+                                // Structural spring
+                                springs.Add(new Spring(
+                                    masses[i],
+                                    masses[j],
+                                    springStiffness,
+                                    springDamping
+                                ));
+                            }
+                            else if (sqrDist <= (sqrThreshold * 2f))
+                            {
+                                // Shear spring (example second type)
+                                springs.Add(new Spring(
+                                    masses[i],
+                                    masses[j],
+                                    springStiffness,
+                                    springDamping
+                                ));
+                            }
+                        }
+                    }
+        }
+
+        Debug.Log(springs.Count);
+    }
+
+    void FixedUpdate()
+    {
+        // Use fixed timestep
+        accumulatedTime += Time.fixedDeltaTime;
+
+        while (accumulatedTime >= timeStep)
+        {
+            SimulateStep(timeStep);
+            accumulatedTime -= timeStep;
+        }
+    }
+
+    void SimulateStep(float dt)
+    {
+        // Apply external forces
+        foreach (Mass mass in masses)
+        {
+            // Reset forces
+            mass.force = Vector3.zero;
+
+            // Apply gravity
+            mass.ApplyForce(mass.mass * gravity);
+
+            // Apply damping (air resistance)
+            mass.ApplyForce(-mass.damping * mass.velocity);
+        }
+
+        // Apply spring forces
+        foreach (Spring spring in springs)
+        {
+            spring.ApplyForces();
+        }
+
+        // Integrate - update velocities and positions
+        foreach (Mass mass in masses)
+        {
+            Vector3 acceleration = mass.force / mass.mass;
+            mass.velocity += acceleration * dt;
+            mass.position += mass.velocity * dt;
+        }
+
+        // Handle constraints and collisions
+        for (int i = 0; i < solverIterations; i++)
+        {
+            foreach (Spring spring in springs)
             {
-                case MaterialType.Steel: return new SpringMaterial { type = mat, stiffness = 10000f, damping = 20f };
-                case MaterialType.Rubber: return new SpringMaterial { type = mat, stiffness = 500f, damping = 10f };
-                case MaterialType.Wood: return new SpringMaterial { type = mat, stiffness = 2000f, damping = 15f };
-                case MaterialType.Jelly: return new SpringMaterial { type = mat, stiffness = 200f, damping = 30f };
-                case MaterialType.Cloth: return new SpringMaterial { type = mat, stiffness = 100f, damping = 50f };
-                default: return new SpringMaterial { type = mat, stiffness = 500f, damping = 5f };
+                ApplySpringConstraint(spring);
+            }
+
+            if (enableGroundCollision)
+            {
+                foreach (Mass mass in masses)
+                {
+                    HandleGroundCollision(mass);
+                }
             }
         }
     }
 
-    private List<Particle> particles;
-    private List<Spring> springs;
-    private Matrix4x4 prevLocalToWorld;
-
-    private void Start()
+    void ApplySpringConstraint(Spring spring)
     {
-        if (voxelization == null)
-            voxelization = GetComponent<Voxelization>();
+        Vector3 delta = spring.massB.position - spring.massA.position;
+        float currentLength = delta.magnitude;
+        if (currentLength == 0) return;
 
-        // Initialize particles at voxel centers (local space)
-        particles = new List<Particle>(voxelization.insideVoxels.Count);
-        foreach (var localCenter in voxelization.insideVoxels)
-            particles.Add(new Particle(localCenter, Vector3.zero, 2));
+        float displacement = currentLength - spring.restLength;
+        Vector3 correction = delta * (displacement / currentLength) * 0.5f;
 
-        // Build different spring types based on voxel connectivity
-        springs = new List<Spring>();
-        float vs = voxelization.voxelSize;
-        float diag = Mathf.Sqrt(2) * vs;
-        float dbl = 2 * vs;
-
-        // Structural springs: direct neighbors (grid axis)
-        AddSprings((a, b) => Vector3.Distance(a.localPosition, b.localPosition) <= vs * 1.01f);
-        // Shear springs: face diagonals
-        AddSprings((a, b) => Mathf.Abs(Vector3.Distance(a.localPosition, b.localPosition) - diag) < 0.01f);
-        // Bending springs: two-step neighbors
-        AddSprings((a, b) => Mathf.Abs(Vector3.Distance(a.localPosition, b.localPosition) - dbl) < 0.01f);
-        // (Optional) Volumetric springs: across cube diagonals (3D)
-        float cubeDiag = Mathf.Sqrt(3) * vs;
-        AddSprings((a, b) => Mathf.Abs(Vector3.Distance(a.localPosition, b.localPosition) - cubeDiag) < 0.01f);
-
-        prevLocalToWorld = transform.localToWorldMatrix;
+        spring.massA.position += correction;
+        spring.massB.position -= correction;
     }
 
-    private void OnDrawGizmos()
+    void HandleGroundCollision(Mass mass)
     {
-        if (particles == null || springs == null) return;
+        Vector3 worldPos = transform.TransformPoint(mass.position);
 
-        Gizmos.color = Color.cyan;
-        foreach (var s in springs)
+        if (worldPos.y < groundHeight)
         {
-            Vector3 A = transform.TransformPoint(particles[s.i].localPosition);
-            Vector3 B = transform.TransformPoint(particles[s.j].localPosition);
-            Gizmos.DrawLine(A, B);
+            // Position correction
+            worldPos.y = groundHeight;
+            mass.position = transform.InverseTransformPoint(worldPos);
+
+            // Velocity reflection with damping
+            Vector3 worldVel = transform.TransformVector(mass.velocity);
+            worldVel.y = -worldVel.y * collisionRestitution;
+            mass.velocity = transform.InverseTransformVector(worldVel);
         }
     }
 
-
-    private void AddSprings(System.Func<Particle, Particle, bool> predicate)
+    void OnDrawGizmos()
     {
-        int c = particles.Count;
-        for (int i = 0; i < c; i++)
-            for (int j = i + 1; j < c; j++)
-                if (predicate(particles[i], particles[j]))
-                    springs.Add(new Spring(i, j, Vector3.Distance(particles[i].localPosition, particles[j].localPosition)));
-    }
+        //if (!voxelizer || !voxelizer.showGizmos) return;
 
-    private struct Particle
-    {
-        public Vector3 localPosition;
-        public Vector3 velocity;
-        public float mass;
-        public Particle(Vector3 pos, Vector3 vel, float m) { localPosition = pos; velocity = vel; mass = m; }
-    }
+        // Draw masses
+        Gizmos.color = Color.red;
+        foreach (Mass m in masses)
+        {
+            Vector3 worldPos = transform.TransformPoint(m.position);
+            Gizmos.DrawSphere(worldPos, voxelizer.voxelSize * 0.1f);
+        }
 
-    private struct Spring
-    {
-        public int i, j;
-        public float restLength;
-        public Spring(int a, int b, float length) { i = a; j = b; restLength = length; }
+        // Draw springs
+        Gizmos.color = Color.blue;
+        foreach (Spring s in springs)
+        {
+            Vector3 pWorld = transform.TransformPoint(s.massA.position);
+            Vector3 qWorld = transform.TransformPoint(s.massB.position);
+            Gizmos.DrawLine(pWorld, qWorld);
+        }
     }
 }
