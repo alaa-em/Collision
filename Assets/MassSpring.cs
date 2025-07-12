@@ -4,10 +4,11 @@ using UnityEngine;
 
 /// <summary>
 /// Manages a mass-spring system for a soft body. Voxelizes the mesh to create interior mass points and connects them with springs.
-/// Updates the simulation (forces, integration, constraints) each physics step, and handles simple ground collisions.
+/// Updates the simulation (forces, integration, constraints) each physics step, and handles simple ground collisions and mesh deformation.
 /// </summary>
 [ExecuteInEditMode]
 [RequireComponent(typeof(Voxelization))]
+[RequireComponent(typeof(MeshFilter))]
 public class MassSpring : MonoBehaviour
 {
     // Global simulation parameters
@@ -22,7 +23,7 @@ public class MassSpring : MonoBehaviour
     // Spring parameters
     public float springStiffness = 5000f;
     public float springDamping = 50f;
-    public float connectionThreshold = 1.1f;  // how far (in voxel lengths) to connect points with a spring
+    public float connectionThreshold = 1.1f;  // base connection distance in voxel units (for Jelly material)
 
     // Ground collision parameters
     public bool enableGroundCollision = true;
@@ -34,6 +35,14 @@ public class MassSpring : MonoBehaviour
     private List<Spring> springs = new List<Spring>();
     private Voxelization voxelizer;
     private float accumulatedTime = 0f;
+
+    // Data for mesh deformation
+    private Mesh originalMesh;
+    private Mesh deformedMesh;
+    private Vector3[] originalVertices;
+    private int[,] vertexToMassIndices;
+    private float[,] vertexWeights;
+    private Vector3[] vertexOffsets;
 
     void Start()
     {
@@ -57,6 +66,8 @@ public class MassSpring : MonoBehaviour
         }
         BuildMasses();
         BuildSprings();
+        // Prepare mesh for deformation after masses and springs are built
+        SetupMeshDeformation();
     }
 
     // Create mass points at each interior voxel position
@@ -71,13 +82,15 @@ public class MassSpring : MonoBehaviour
         }
     }
 
-    // Create springs connecting nearby mass points (within threshold distance)
+    // Create springs connecting nearby mass points based on material type
     private void BuildSprings()
     {
         springs.Clear();
         if (masses.Count == 0) return;
         float voxelSize = voxelizer.voxelSize;
-        float maxDist = voxelSize * connectionThreshold;
+        // Determine connection range: Jelly = orthogonal only, Metal = include diagonals (sqrt(3) distance)
+        float thresholdFactor = (voxelizer.softMaterialType == Voxelization.MaterialType.Metal ? 1.8f : 1.1f);
+        float maxDist = voxelSize * thresholdFactor;
         float maxDistSqr = maxDist * maxDist;
         // Spatial hashing: bucket masses into grid cells to reduce pair checks
         Dictionary<Vector3Int, List<int>> grid = new Dictionary<Vector3Int, List<int>>();
@@ -96,7 +109,7 @@ public class MassSpring : MonoBehaviour
             }
             grid[cell].Add(i);
         }
-        // For each mass, check neighbors in adjacent cells for proximity
+        // For each mass, check neighboring cells for nearby masses
         for (int i = 0; i < masses.Count; i++)
         {
             Vector3 p = masses[i].position;
@@ -115,7 +128,7 @@ public class MassSpring : MonoBehaviour
                         if (!grid.ContainsKey(neighborCell)) continue;
                         foreach (int j in grid[neighborCell])
                         {
-                            if (j <= i) continue; // avoid duplicates and self
+                            if (j <= i) continue; // avoid duplicate pairs and self
                             float sqrDist = (masses[i].position - masses[j].position).sqrMagnitude;
                             if (sqrDist <= maxDistSqr)
                             {
@@ -128,8 +141,8 @@ public class MassSpring : MonoBehaviour
                 }
             }
         }
-        // Debug: print total number of springs
-        UnityEngine.Debug.Log($"MassSpring: Created {springs.Count} springs connecting {masses.Count} mass points.");
+        // Debug: print total number of springs created
+        UnityEngine.Debug.Log($"MassSpring: Created {springs.Count} springs connecting {masses.Count} mass points (Material={voxelizer.softMaterialType}).");
     }
 
     void FixedUpdate()
@@ -140,6 +153,11 @@ public class MassSpring : MonoBehaviour
         {
             SimulateStep(timeStep);
             accumulatedTime -= timeStep;
+        }
+        // Update visual mesh vertices based on mass movements after simulation
+        if (deformedMesh != null)
+        {
+            UpdateMeshFromMasses();
         }
     }
 
@@ -152,10 +170,10 @@ public class MassSpring : MonoBehaviour
             mass.force = Vector3.zero;
             // Gravity
             mass.ApplyForce(mass.mass * gravity);
-            // Damping (simple linear drag in proportion to velocity)
+            // Damping (simple linear drag proportional to velocity)
             mass.ApplyForce(-mass.damping * mass.velocity);
         }
-        // Apply spring forces (elastic and damping along springs)
+        // Apply spring forces (elastic + damping along springs)
         foreach (Spring spring in springs)
         {
             spring.ApplyForces();
@@ -167,10 +185,10 @@ public class MassSpring : MonoBehaviour
             mass.velocity += acceleration * dt;
             mass.position += mass.velocity * dt;
         }
-        // Solve constraints iteratively (spring rest lengths and ground collisions)
+        // Solve constraints iteratively (enforce spring rest lengths and handle ground collisions)
         for (int iter = 0; iter < solverIterations; iter++)
         {
-            // Position-based constraint: enforce spring rest lengths
+            // Constraint: enforce spring rest lengths (position-based correction)
             foreach (Spring spring in springs)
             {
                 ApplySpringConstraint(spring);
@@ -209,7 +227,7 @@ public class MassSpring : MonoBehaviour
             // Position correction: put the point on the ground
             worldPos.y = groundHeight;
             mass.position = transform.InverseTransformPoint(worldPos);
-            // Reflect velocity vertical component with restitution (bounce damping)
+            // Reflect velocity's vertical component with restitution (bounce)
             Vector3 worldVel = transform.TransformVector(mass.velocity);
             if (worldVel.y < 0f)
             {
@@ -219,10 +237,136 @@ public class MassSpring : MonoBehaviour
         }
     }
 
-    // Provide access to internal masses list (useful for collision manager)
+    // Expose internal masses list (for collision manager or other uses)
     public IEnumerable<Mass> GetMasses()
     {
         return masses;
+    }
+
+    /// <summary>
+    /// Prepares the mesh for real-time deformation by creating a copy of the original mesh 
+    /// and calculating mappings from mesh vertices to mass points.
+    /// </summary>
+    private void SetupMeshDeformation()
+    {
+        MeshFilter mf = GetComponent<MeshFilter>();
+        if (mf == null || mf.sharedMesh == null) return;
+        // Make a copy of the original mesh for deformation
+        originalMesh = mf.sharedMesh;
+        deformedMesh = Instantiate(originalMesh);
+        mf.mesh = deformedMesh;
+        // Get original vertex positions (local space)
+        originalVertices = originalMesh.vertices;
+        int vertexCount = originalVertices.Length;
+        vertexToMassIndices = new int[vertexCount, 4];
+        vertexWeights = new float[vertexCount, 4];
+        vertexOffsets = new Vector3[vertexCount];
+        // Precompute mass initial positions for distance calculations
+        Vector3[] massPositions = new Vector3[masses.Count];
+        for (int m = 0; m < masses.Count; m++)
+        {
+            massPositions[m] = masses[m].position;
+        }
+        // For each vertex, find up to 4 nearest mass points
+        for (int i = 0; i < vertexCount; i++)
+        {
+            Vector3 vPos = originalVertices[i];
+            // Initialize nearest neighbor tracking
+            float[] bestDist = { float.MaxValue, float.MaxValue, float.MaxValue, float.MaxValue };
+            int[] bestIndex = { -1, -1, -1, -1 };
+            // Find 4 closest masses (using squared distance for efficiency)
+            for (int m = 0; m < massPositions.Length; m++)
+            {
+                float distSqr = (massPositions[m] - vPos).sqrMagnitude;
+                if (distSqr < bestDist[3])
+                {
+                    // Insert this mass in sorted order (smallest distances first)
+                    int insertPos = 3;
+                    if (distSqr < bestDist[2]) insertPos = 2;
+                    if (distSqr < bestDist[1]) insertPos = 1;
+                    if (distSqr < bestDist[0]) insertPos = 0;
+                    // Shift larger distances downwards
+                    for (int k = 3; k > insertPos; k--)
+                    {
+                        bestDist[k] = bestDist[k - 1];
+                        bestIndex[k] = bestIndex[k - 1];
+                    }
+                    bestDist[insertPos] = distSqr;
+                    bestIndex[insertPos] = m;
+                }
+            }
+            // Compute weights for the 4 nearest masses
+            float[] w = { 0f, 0f, 0f, 0f };
+            float wSum = 0f;
+            // If the closest mass is extremely near the vertex, assign full weight to it
+            if (bestIndex[0] != -1 && bestDist[0] < 1e-6f)
+            {
+                w[0] = 1f;
+                bestIndex[1] = bestIndex[2] = bestIndex[3] = -1;
+            }
+            else
+            {
+                for (int k = 0; k < 4; k++)
+                {
+                    if (bestIndex[k] < 0) break;
+                    float dist = Mathf.Sqrt(bestDist[k]);
+                    // Inverse-distance weighting
+                    w[k] = (dist > 1e-6f ? 1f / dist : 0f);
+                    wSum += w[k];
+                }
+                // Normalize weights to sum to 1
+                if (wSum > 1e-6f)
+                {
+                    for (int k = 0; k < 4; k++)
+                    {
+                        w[k] /= wSum;
+                    }
+                }
+            }
+            // Compute the vertex's initial position approximation from masses and store offset
+            Vector3 approxPos = Vector3.zero;
+            for (int k = 0; k < 4; k++)
+            {
+                vertexToMassIndices[i, k] = bestIndex[k];
+                vertexWeights[i, k] = w[k];
+                if (bestIndex[k] >= 0)
+                {
+                    approxPos += massPositions[bestIndex[k]] * w[k];
+                }
+            }
+            // Offset is the difference between actual vertex position and mass-interpolated position
+            vertexOffsets[i] = vPos - approxPos;
+        }
+    }
+
+    /// <summary>
+    /// Updates the deformed mesh vertices each frame based on current mass positions.
+    /// </summary>
+    private void UpdateMeshFromMasses()
+    {
+        if (deformedMesh == null) return;
+        Vector3[] vertices = new Vector3[originalVertices.Length];
+        // Compute new vertex positions using the weighted mass positions and stored offsets
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            Vector3 blendedPos = Vector3.zero;
+            // Combine contributions from up to 4 nearest masses
+            for (int k = 0; k < 4; k++)
+            {
+                int mIndex = vertexToMassIndices[i, k];
+                float w = vertexWeights[i, k];
+                if (mIndex >= 0 && w > 0f)
+                {
+                    blendedPos += masses[mIndex].position * w;
+                }
+            }
+            // Add the original offset to preserve the mesh's initial shape details
+            vertices[i] = blendedPos + vertexOffsets[i];
+        }
+        // Update mesh vertices and recalc normals for correct lighting
+        deformedMesh.vertices = vertices;
+        deformedMesh.RecalculateNormals();
+        deformedMesh.RecalculateBounds();
     }
 
     void OnDrawGizmos()
