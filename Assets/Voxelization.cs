@@ -36,6 +36,12 @@ public struct AABB
     {
         return new AABB(Vector3.Min(a.Min, b.Min), Vector3.Max(a.Max, b.Max));
     }
+    public bool Contains(Vector3 point)
+    {
+        return point.x >= Min.x && point.x <= Max.x &&
+               point.y >= Min.y && point.y <= Max.y &&
+               point.z >= Min.z && point.z <= Max.z;
+    }
 }
 
 
@@ -46,9 +52,9 @@ public struct AABB
 public class Voxelization : MonoBehaviour
 {
     public int resolution = 32;
-    public float voxelSize = 0.1f;
+    public float voxelSize = 0.2f;
     public bool showGizmos = true;
-
+    public float Density;
     private Mesh mesh;
     private Vector3[] vertices;
     private int[] triangles;
@@ -79,25 +85,26 @@ public class Voxelization : MonoBehaviour
     }
     public class Voxel
     {
+        public float Density;
         public bool IsInside;
         public Vector3 WorldPosition;
         public Vector3 LocalPosition;
 
-        public Voxel(bool inside, Vector3 worldPos, Vector3 localPos)
+        public Voxel(float D, Vector3 worldPos, Vector3 localPos)
         {
-            IsInside = inside;
+            Density = D;
             WorldPosition = worldPos;
             LocalPosition = localPos;
         }
     }
 
     void Start() => GenerateVoxels();
-    
+
     void OnValidate() => GenerateVoxels();
 
 
     public Voxel[,,] Voxels;
-
+    public List<Voxel> InsideVoxels1 = new List<Voxel>();
 
     public void GenerateVoxels()
     {
@@ -145,19 +152,94 @@ public class Voxelization : MonoBehaviour
                     for (int y = 0; y < voxY; y++)
                         for (int z = 0; z < voxZ; z++)
                         {
-                            // compute voxel center positions
+                            /*
+                        // compute voxel center positions
+                        Vector3 worldCenter = origin + new Vector3(
+                            (x + 0.5f) * voxelSize,
+                            (y + 0.5f) * voxelSize,
+                            (z + 0.5f) * voxelSize);
+                        Vector3 localCenter = worldToLocal.MultiplyPoint3x4(worldCenter);
+
+                        // count odd‐ray hits
+                        Vector3[] dirs = {
+                Vector3.right,  Vector3.left,
+                Vector3.up,     Vector3.down,
+                Vector3.forward,Vector3.back
+            };
+                        int oddCount = 0;
+                        foreach (var dir in dirs)
+                        {
+                            int hits = TraverseBVH(bvhRoot, localCenter, dir, float.MaxValue);
+                            if ((hits & 1) == 1) oddCount++;
+                            if (oddCount >= 3) break;
+                        }
+
+                        bool isInside = oddCount >= 3;
+
+                        // store into your Voxel array
+                        Voxels[x, y, z] =
+                            new Voxel(isInside, worldCenter, localCenter);
+
+                        // keep your existing list of inside‐centers
+                        if (isInside)
+                            insideVoxels.Add(localCenter);
+                        */
+                            /*
+                                                        Vector3 worldCenter = origin + new Vector3(
+                                                            (x + 0.5f) * voxelSize,
+                                                            (y + 0.5f) * voxelSize,
+                                                            (z + 0.5f) * voxelSize);
+                                                        Vector3 localCenter = worldToLocal.MultiplyPoint3x4(worldCenter);
+
+                                                        // find minimum distance to mesh triangles
+                                                        float minDist = float.MaxValue;
+
+                                                        for (int ti = 0; ti < triangles.Length / 3; ti++)
+                                                        {
+                                                            Vector3 v0 = vertices[triangles[3 * ti + 0]];
+                                                            Vector3 v1 = vertices[triangles[3 * ti + 1]];
+                                                            Vector3 v2 = vertices[triangles[3 * ti + 2]];
+
+                                                            float d = PointTriangleDistance(localCenter, v0, v1, v2);
+                                                            if (d < minDist) minDist = d;
+                                                        }
+
+                                                        // determine sign using your existing odd-ray test
+                                                        Vector3[] dirs = {
+                                                                Vector3.right, Vector3.left,
+                                                                Vector3.up, Vector3.down,
+                                                                Vector3.forward, Vector3.back
+                                                            };
+                                                        int oddCount = 0;
+                                                        foreach (var dir in dirs)
+                                                        {
+                                                            int hits = TraverseBVH(bvhRoot, localCenter, dir, float.MaxValue);
+                                                            if ((hits & 1) == 1) oddCount++;
+                                                            if (oddCount >= 3) break;
+                                                        }
+                                                        float signedDist = (oddCount >= 3) ? -minDist : minDist;
+
+                                                        // store into your Voxel array
+                                                        Voxels[x, y, z] =
+                                                            new Voxel(signedDist, worldCenter, localCenter);
+
+                                                        // if you still want your inside voxel list:
+                                                        if (signedDist < 0)
+                                                            insideVoxels.Add(localCenter);*/
+
+                            // Compute voxel center positions
                             Vector3 worldCenter = origin + new Vector3(
                                 (x + 0.5f) * voxelSize,
                                 (y + 0.5f) * voxelSize,
                                 (z + 0.5f) * voxelSize);
                             Vector3 localCenter = worldToLocal.MultiplyPoint3x4(worldCenter);
 
-                            // count odd‐ray hits
+                            // Use BVH for inside/outside test
                             Vector3[] dirs = {
-                    Vector3.right,  Vector3.left,
-                    Vector3.up,     Vector3.down,
-                    Vector3.forward,Vector3.back
-                };
+                            Vector3.right, Vector3.left,
+                            Vector3.up, Vector3.down,
+                            Vector3.forward, Vector3.back
+                                };
                             int oddCount = 0;
                             foreach (var dir in dirs)
                             {
@@ -166,15 +248,21 @@ public class Voxelization : MonoBehaviour
                                 if (oddCount >= 3) break;
                             }
 
-                            bool isInside = oddCount >= 3;
+                            // Use BVH for distance calculation (NEW FUNCTION)
+                            float minDist = FindMinDistanceBVH(bvhRoot, localCenter);
 
-                            // store into your Voxel array
-                            Voxels[x, y, z] =
-                                new Voxel(isInside, worldCenter, localCenter);
+                            // Determine sign and store voxel
+                            float signedDist = (oddCount >= 3) ? -minDist : minDist;
+                            Voxels[x, y, z] = new Voxel(signedDist, worldCenter, localCenter);
 
-                            // keep your existing list of inside‐centers
-                            if (isInside)
+                            if (signedDist < 0)
+                            {
+                                InsideVoxels1.Add(new Voxel(signedDist, worldCenter, localCenter));
                                 insideVoxels.Add(localCenter);
+                            }
+
+                        
+
                         }
             });
         }
@@ -208,17 +296,17 @@ public class Voxelization : MonoBehaviour
             nodeBB = AABB.Merge(nodeBB, AABB.FromTriangle(v0, v1, v2));
         }
 
-      
+
         if (triIndices.Count <= 8)
             return new BVHNode(triIndices, nodeBB);
 
-        
+
         Vector3 extents = nodeBB.Max - nodeBB.Min;
         int axis = extents.x > extents.y
                 ? (extents.x > extents.z ? 0 : 2)
                 : (extents.y > extents.z ? 1 : 2);
 
-      
+
         triIndices.Sort((a, b) =>
         {
             float ca = (
@@ -232,7 +320,7 @@ public class Voxelization : MonoBehaviour
             return ca.CompareTo(cb);
         });
 
-    
+
         int mid = triIndices.Count / 2;
         var leftList = triIndices.GetRange(0, mid);
         var rightList = triIndices.GetRange(mid, triIndices.Count - mid);
@@ -242,7 +330,7 @@ public class Voxelization : MonoBehaviour
         return new BVHNode(leftNode, rightNode);
     }
 
-    
+
     int TraverseBVH(BVHNode node, Vector3 origin, Vector3 dir, float maxDist)
     {
         if (!node.Bounds.IntersectRay(origin, dir, maxDist))
@@ -266,13 +354,13 @@ public class Voxelization : MonoBehaviour
         }
         else
         {
-           
+
             return TraverseBVH(node.Left, origin, dir, maxDist)
                  + TraverseBVH(node.Right, origin, dir, maxDist);
         }
     }
 
-    
+
     bool RayIntersectsTriangle(Vector3 origin, Vector3 dir, Vector3 v0, Vector3 v1, Vector3 v2, out float distance)
     {
         const float EPSILON = 1e-6f;
@@ -334,6 +422,78 @@ public class Voxelization : MonoBehaviour
     //            }
     //}
 
+    public static float PointTriangleDistance(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    {
+        // From Real-Time Collision Detection by Christer Ericson
+        Vector3 ab = b - a;
+        Vector3 ac = c - a;
+        Vector3 ap = p - a;
 
+        float d1 = Vector3.Dot(ab, ap);
+        float d2 = Vector3.Dot(ac, ap);
+        if (d1 <= 0.0f && d2 <= 0.0f) return (p - a).magnitude;
 
+        Vector3 bp = p - b;
+        float d3 = Vector3.Dot(ab, bp);
+        float d4 = Vector3.Dot(ac, bp);
+        if (d3 >= 0.0f && d4 <= d3) return (p - b).magnitude;
+
+        Vector3 cp = p - c;
+        float d5 = Vector3.Dot(ab, cp);
+        float d6 = Vector3.Dot(ac, cp);
+        if (d6 >= 0.0f && d5 <= d6) return (p - c).magnitude;
+
+        float vc = d1 * d4 - d3 * d2;
+        if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+        {
+            float v = d1 / (d1 - d3);
+            return (p - (a + v * ab)).magnitude;
+        }
+
+        float vb = d5 * d2 - d1 * d6;
+        if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+        {
+            float w = d2 / (d2 - d6);
+            return (p - (a + w * ac)).magnitude;
+        }
+
+        float va = d3 * d6 - d5 * d4;
+        if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+        {
+            float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+            return (p - (b + w * (c - b))).magnitude;
+        }
+
+        Vector3 n = Vector3.Cross(ab, ac).normalized;
+        return Mathf.Abs(Vector3.Dot(ap, n));
+    }
+
+    private float FindMinDistanceBVH(BVHNode node, Vector3 point)
+    {
+        // If node doesn't contain point, skip entirely
+        if (!node.Bounds.Contains(point))
+            return float.MaxValue;
+
+        if (node.IsLeaf)
+        {
+            float minDist = float.MaxValue;
+            foreach (int ti in node.TriIndices)
+            {
+                Vector3 v0 = vertices[triangles[3 * ti + 0]];
+                Vector3 v1 = vertices[triangles[3 * ti + 1]];
+                Vector3 v2 = vertices[triangles[3 * ti + 2]];
+
+                float d = PointTriangleDistance(point, v0, v1, v2);
+                if (d < minDist) minDist = d;
+            }
+            return minDist;
+        }
+        else
+        {
+            // Check both children and return the minimum distance
+            float leftDist = FindMinDistanceBVH(node.Left, point);
+            float rightDist = FindMinDistanceBVH(node.Right, point);
+            return Mathf.Min(leftDist, rightDist);
+        }
+    }
 }

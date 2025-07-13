@@ -1,18 +1,21 @@
-﻿using System.Collections;
-using System.Collections.Generic;
+﻿// Spring.cs
 using UnityEngine;
 
-public class Spring : MonoBehaviour
+public class Spring
 {
-    // Start is called before the first frame update
-    void Start()
+    public Mass massA;
+    public Mass massB;
+    public float stiffness;  // k_s
+    public float damping;    // k_d
+    public float restLength;
+
+    public Spring(Mass a, Mass b, float stiff, float damp)
     {
-        
+        massA = a;
+        massB = b;
+        stiffness = stiff;
+        damping = damp;
+        restLength = Vector3.Distance(a.position, b.position);
     }
 
-    // Update is called once per frame
-    void Update()
-    {
-        
-    }
 }

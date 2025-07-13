@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using UnityEngine;
 using static Voxelization;
 
@@ -300,126 +301,192 @@ public class MarchCube : MonoBehaviour
         {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
     };
 
-    public static readonly int[,] edgeConnection = new int[,] {
-        {0,1}, {1,2}, {2,3}, {3,0},
-        {4,5}, {5,6}, {6,7}, {7,4},
-        {0,4}, {1,5}, {2,6}, {3,7}
-    };
-
-
-    public static readonly int[,] vertexOffset = new int[,] {
-        {0, 0, 1},{1, 0, 1},{1, 0, 0},{0, 0, 0},
-        {0, 1, 1},{1, 1, 1},{1, 1, 0},{0, 1, 0}
-    };
-
-    public static readonly float[,] edgeDirection = new float[,] {
-        {1.0f, 0.0f, 0.0f},{ 0.0f, 0.0f, -1.0f},{-1.0f, 0.0f, 0.0f},{ 0.0f, 0.0f, 1.0f},
-        {1.0f, 0.0f, 0.0f},{ 0.0f, 0.0f, -1.0f},{-1.0f, 0.0f, 0.0f},{ 0.0f, 0.0f, 1.0f},
-        {0.0f, 1.0f, 0.0f},{0.0f, 1.0f, 0.0f},{ 0.0f, 1.0f, 0.0f},{0.0f,  1.0f, 0.0f}
-    };
-
     public Voxelization source;
+    public float isoLevel = 0f;
 
     private Mesh mesh;
+    private List<Vector3> vertices = new List<Vector3>();
+    private List<int> triangles = new List<int>();
+    private List<Vector3> normals = new List<Vector3>();
 
     void OnValidate() => BuildMesh();
     void Start() => BuildMesh();
     public void BuildMesh()
     {
-        if (source == null || source.Voxels == null) return;
-
-        var vox = source.Voxels;
-        int nx = vox.GetLength(0);
-        int ny = vox.GetLength(1);
-        int nz = vox.GetLength(2);
-
-        var verts = new List<Vector3>();
-        var triangles = new List<int>();
-
-        Vector3[] edgeVerts = new Vector3[12];
-
-        for (int x = 0; x < nx-1; x++)
-        for (int y = 0; y < ny-1; y++)
-        for (int z = 0; z < nz-1; z++)
+        if (source == null || source.Voxels == null)
         {
-  
-                 Voxel[] corner = new Voxel[8] {
-                vox[x  , y  , z  ],
-                vox[x+1, y  , z  ],
-                vox[x+1, y+1, z  ],
-                vox[x  , y+1, z  ],
-                vox[x  , y  , z+1],
-                vox[x+1, y  , z+1],
-                vox[x+1, y+1, z+1],
-                vox[x  , y+1, z+1]
-            };
+            Debug.LogWarning("Source voxel data not available");
+            return;
+        }
 
-            
-                    int cubeIndex = 0;
-                    for (int i = 0; i < 8; i++)
-                        if (corner[i].IsInside)
-                            cubeIndex |= 1 << i;
+        vertices.Clear();
+        triangles.Clear();
+        normals.Clear();
 
-              
-                    int edges = edgeTable[cubeIndex];
-                    if (edges == 0) continue;
+        int width = source.Voxels.GetLength(0);
+        int height = source.Voxels.GetLength(1);
+        int depth = source.Voxels.GetLength(2);
 
-        
-                    for (int e = 0; e < 12; e++)
-                    {
-                        if ((edges & (1 << e)) == 0) continue;
-                        var (i0, i1) = edgeIndexToCorners[e];
-                        edgeVerts[e] = VertexInterp(
-                            corner[i0].LocalPosition,
-                            corner[i1].LocalPosition
-                        );
-                    }
+        // Precompute gradients for normal calculation
+        Vector3[,,] gradients = new Vector3[width, height, depth];
+        PrecomputeGradients(width, height, depth, gradients);
 
-      
-                    for (int t = 0; t < 5; t++)
-                    {
-                        int idx = triTable[cubeIndex, 3 * t];
-                        if (idx < 0) break;
-      
-                        int e0 = triTable[cubeIndex, 3 * t + 0];
-                        int e1 = triTable[cubeIndex, 3 * t + 1];
-                        int e2 = triTable[cubeIndex, 3 * t + 2];
-
-                        int vIdx = verts.Count;
-                        verts.Add(edgeVerts[e0]);
-                        verts.Add(edgeVerts[e1]);
-                        verts.Add(edgeVerts[e2]);
-                        triangles.Add(vIdx + 0);
-                        triangles.Add(vIdx + 1);
-                        triangles.Add(vIdx + 2);
-                    }
+        // Process each cell in the grid
+        for (int x = 0; x < width - 1; x++)
+        {
+            for (int y = 0; y < height - 1; y++)
+            {
+                for (int z = 0; z < depth - 1; z++)
+                {
+                    ProcessCell(x, y, z, gradients);
                 }
+            }
+        }
 
+        CreateUnityMesh();
+    }
 
+    private void PrecomputeGradients(int w, int h, int d, Vector3[,,] gradients)
+    {
+        for (int x = 0; x < w; x++)
+        {
+            for (int y = 0; y < h; y++)
+            {
+                for (int z = 0; z < d; z++)
+                {
+                    gradients[x, y, z] = new Vector3(
+                        source.Voxels[Mathf.Min(x + 1, w - 1), y, z].Density - source.Voxels[Mathf.Max(x - 1, 0), y, z].Density,
+                        source.Voxels[x, Mathf.Min(y + 1, h - 1), z].Density - source.Voxels[x, Mathf.Max(y - 1, 0), z].Density,
+                        source.Voxels[x, y, Mathf.Min(z + 1, d - 1)].Density - source.Voxels[x, y, Mathf.Max(z - 1, 0)].Density
+                    );
+                }
+            }
+        }
+    }
+
+    private void ProcessCell(int x, int y, int z, Vector3[,,] gradients)
+    {
+        // Get voxels for the 8 corners of the cube
+        Voxel[] cubeCorners = new Voxel[8]
+        {
+        source.Voxels[x,     y,     z],
+        source.Voxels[x + 1, y,     z],
+        source.Voxels[x + 1, y,     z + 1],
+        source.Voxels[x,     y,     z + 1],
+        source.Voxels[x,     y + 1, z],
+        source.Voxels[x + 1, y + 1, z],
+        source.Voxels[x + 1, y + 1, z + 1],
+        source.Voxels[x,     y + 1, z + 1]
+        };
+
+        // Calculate cube index
+        int cubeIndex = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            if (cubeCorners[i].Density < isoLevel)
+                cubeIndex |= 1 << i;
+        }
+
+        int edgeFlags = edgeTable[cubeIndex];
+        if (edgeFlags == 0) return;
+
+        Vector3[] edgeVertices = new Vector3[12];
+        Vector3[] edgeNormals = new Vector3[12];
+
+        // Edge 0
+        if ((edgeFlags & 1) != 0)
+            InterpolateEdge(0, cubeCorners[0], cubeCorners[1], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 1
+        if ((edgeFlags & 2) != 0)
+            InterpolateEdge(1, cubeCorners[1], cubeCorners[2], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 2
+        if ((edgeFlags & 4) != 0)
+            InterpolateEdge(2, cubeCorners[2], cubeCorners[3], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 3
+        if ((edgeFlags & 8) != 0)
+            InterpolateEdge(3, cubeCorners[3], cubeCorners[0], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 4
+        if ((edgeFlags & 16) != 0)
+            InterpolateEdge(4, cubeCorners[4], cubeCorners[5], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 5
+        if ((edgeFlags & 32) != 0)
+            InterpolateEdge(5, cubeCorners[5], cubeCorners[6], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 6
+        if ((edgeFlags & 64) != 0)
+            InterpolateEdge(6, cubeCorners[6], cubeCorners[7], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 7
+        if ((edgeFlags & 128) != 0)
+            InterpolateEdge(7, cubeCorners[7], cubeCorners[4], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 8
+        if ((edgeFlags & 256) != 0)
+            InterpolateEdge(8, cubeCorners[0], cubeCorners[4], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 9
+        if ((edgeFlags & 512) != 0)
+            InterpolateEdge(9, cubeCorners[1], cubeCorners[5], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 10
+        if ((edgeFlags & 1024) != 0)
+            InterpolateEdge(10, cubeCorners[2], cubeCorners[6], gradients, ref edgeVertices, ref edgeNormals);
+        // Edge 11
+        if ((edgeFlags & 2048) != 0)
+            InterpolateEdge(11, cubeCorners[3], cubeCorners[7], gradients, ref edgeVertices, ref edgeNormals);
+
+        // Create triangles
+        for (int i = 0; triTable[cubeIndex, i] != -1; i += 3)
+        {
+            int a = triTable[cubeIndex, i];
+            int b = triTable[cubeIndex, i + 1];
+            int c = triTable[cubeIndex, i + 2];
+
+            int vertexIndex = vertices.Count;
+            vertices.Add(edgeVertices[a]);
+            vertices.Add(edgeVertices[b]);
+            vertices.Add(edgeVertices[c]);
+
+            normals.Add(edgeNormals[a]);
+            normals.Add(edgeNormals[b]);
+            normals.Add(edgeNormals[c]);
+
+            triangles.Add(vertexIndex);
+            triangles.Add(vertexIndex + 1);
+            triangles.Add(vertexIndex + 2);
+        }
+    }
+
+    // Modify the InterpolateEdge method to handle equal densities:
+    private void InterpolateEdge(int edgeIndex, Voxel a, Voxel b, Vector3[,,] gradients, ref Vector3[] edgeVertices, ref Vector3[] edgeNormals)
+    {
+        float t = (isoLevel - a.Density) / (b.Density - a.Density);
+        t = Mathf.Clamp01(t);
+
+        // Convert world positions to local space
+        Vector3 localA = transform.InverseTransformPoint(a.WorldPosition);
+        Vector3 localB = transform.InverseTransformPoint(b.WorldPosition);
+
+        edgeVertices[edgeIndex] = Vector3.Lerp(localA, localB, t);
+        edgeNormals[edgeIndex] = Vector3.Slerp(
+            gradients[(int)a.LocalPosition.x, (int)a.LocalPosition.y, (int)a.LocalPosition.z],
+            gradients[(int)b.LocalPosition.x, (int)b.LocalPosition.y, (int)b.LocalPosition.z],
+            t
+        ).normalized;
+    }
+    private void CreateUnityMesh()
+    {
         if (mesh == null)
         {
-            mesh = new Mesh { name = "MarchingCubesMesh" };
-            GetComponent<MeshFilter>().mesh = mesh;
+            mesh = new Mesh();
+            mesh.name = "Marching Cubes Mesh";
         }
         else
         {
             mesh.Clear();
         }
 
-        mesh.SetVertices(verts);
+        mesh.SetVertices(vertices);
         mesh.SetTriangles(triangles, 0);
-        mesh.RecalculateNormals();
+        mesh.SetNormals(normals);
+        mesh.RecalculateBounds();  // Ensures the mesh is centered
+
+        GetComponent<MeshFilter>().mesh = mesh;
     }
 
-    private static Vector3 VertexInterp(Vector3 p0, Vector3 p1)
-    {
-        return (p0 + p1) * 0.5f;
-    }
-
-    private static readonly (int, int)[] edgeIndexToCorners = new (int, int)[]
-    {
-        (0,1), (1,2), (2,3), (3,0),
-        (4,5), (5,6), (6,7), (7,4),
-        (0,4), (1,5), (2,6), (3,7)
-    };
 }
